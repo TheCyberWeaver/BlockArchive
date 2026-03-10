@@ -4,8 +4,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from .manager import ArchiveManager
-from .ui.main_window import MainWindow
+from blockarchive.manager import ArchiveManager
+from blockarchive.ui.main_window import MainWindow
 
 
 def main() -> int:

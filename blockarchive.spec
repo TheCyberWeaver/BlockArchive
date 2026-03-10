@@ -6,7 +6,7 @@ from pathlib import Path
 project_root = Path.cwd()
 
 a = Analysis(
-    ["src/blockarchive/app.py"],
+    ["src/blockarchive/__main__.py"],
     pathex=[str(project_root / "src")],
     binaries=[],
     datas=[],
