@@ -8,6 +8,7 @@ from ..models import AppSettings
 
 class ArchiveWorker(QObject):
     snapshot_updated = Signal(object)
+    archives_updated = Signal(object)
     history_updated = Signal(object)
     stale_partials_updated = Signal(object)
     settings_updated = Signal(object)
@@ -34,6 +35,7 @@ class ArchiveWorker(QObject):
         self._busy = True
         try:
             self.manager.discover_projects()
+            self.manager.discover_archives()
         except Exception as exc:  # pragma: no cover - UI guardrail
             self.info_message.emit(str(exc))
         finally:
@@ -89,6 +91,24 @@ class ArchiveWorker(QObject):
         self.manager.set_excluded(source_paths, excluded)
         self._emit_state()
 
+    @Slot()
+    def refresh_archives(self) -> None:
+        self.manager.discover_archives()
+        self._emit_state()
+
+    @Slot(object)
+    def restore_archives(self, archive_paths: list[str]) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            self.manager.restore_archives(archive_paths)
+        except Exception as exc:  # pragma: no cover - UI guardrail
+            self.info_message.emit(str(exc))
+        finally:
+            self._busy = False
+            self._emit_state()
+
     def _restart_timer(self) -> None:
         if self._timer is None:
             self._timer = QTimer(self)
@@ -99,5 +119,6 @@ class ArchiveWorker(QObject):
 
     def _emit_state(self) -> None:
         self.snapshot_updated.emit(self.manager.snapshot())
+        self.archives_updated.emit(self.manager.available_archives())
         self.history_updated.emit(self.manager.recent_history())
         self.stale_partials_updated.emit(self.manager.stale_partials())

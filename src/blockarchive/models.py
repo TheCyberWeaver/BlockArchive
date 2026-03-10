@@ -128,6 +128,28 @@ class ArchiveResult:
 
 
 @dataclass(slots=True)
+class ArchivedProjectRecord:
+    name: str
+    archive_path: str
+    target_path: str
+    status: str
+    detail: str
+    archived_at: str = ""
+    file_count: int = 0
+    total_bytes: int = 0
+
+
+@dataclass(slots=True)
+class RestoreResult:
+    project_name: str
+    archive_path: str
+    target_path: str
+    status: str
+    detail: str
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
 class IndexEntry:
     project_name: str
     archive_path: str

@@ -5,7 +5,15 @@ from pathlib import Path
 from .archiver import ProjectArchiver, scan_project_stats
 from .history_store import HistoryStore
 from .index_store import IndexStore
-from .models import AppSettings, HistoryEntry, IndexEntry, ProjectRecord, ProjectStatus, utc_now_iso
+from .models import (
+    AppSettings,
+    ArchivedProjectRecord,
+    HistoryEntry,
+    IndexEntry,
+    ProjectRecord,
+    ProjectStatus,
+    utc_now_iso,
+)
 from .settings import SettingsStore
 
 
@@ -14,6 +22,7 @@ class ArchiveManager:
         self.settings_store = settings_store or SettingsStore()
         self.settings = self.settings_store.load()
         self.records: dict[str, ProjectRecord] = {}
+        self.archive_records: dict[str, ArchivedProjectRecord] = {}
         self._refresh_supporting_stores()
 
     def _refresh_supporting_stores(self) -> None:
@@ -37,6 +46,9 @@ class ArchiveManager:
     def recent_history(self, limit: int = 200) -> list[HistoryEntry]:
         return self.history_store.read_recent(limit=limit)
 
+    def available_archives(self) -> list[ArchivedProjectRecord]:
+        return sorted(self.archive_records.values(), key=lambda record: record.name.lower())
+
     def stale_partials(self) -> list[str]:
         return [str(path) for path in self.archiver.list_stale_partials()]
 
@@ -57,6 +69,7 @@ class ArchiveManager:
 
     def scan_and_process(self) -> list[ProjectRecord]:
         self.discover_projects()
+        self.discover_archives()
         return self.snapshot()
 
     def discover_projects(self) -> list[ProjectRecord]:
@@ -123,6 +136,37 @@ class ArchiveManager:
                 self.records.pop(key, None)
         return self.snapshot()
 
+    def discover_archives(self) -> list[ArchivedProjectRecord]:
+        archive_dir = Path(self.settings.archive_dir)
+        source_dir = Path(self.settings.source_dir)
+        index_entries = {entry.archive_path: entry for entry in self.index_store.load()}
+        self.archive_records = {}
+
+        if not archive_dir.exists():
+            return self.available_archives()
+
+        for archive_path in sorted(archive_dir.glob("*.tar")):
+            entry = index_entries.get(str(archive_path))
+            project_name = entry.project_name if entry else archive_path.stem
+            target_path = Path(entry.source_path) if entry else source_dir / project_name
+            status = "ready"
+            detail = "Ready to restore into the source folder."
+            if target_path.exists():
+                status = "source-exists"
+                detail = "A source folder with the same name already exists."
+
+            self.archive_records[str(archive_path)] = ArchivedProjectRecord(
+                name=project_name,
+                archive_path=str(archive_path),
+                target_path=str(target_path),
+                status=status,
+                detail=detail,
+                archived_at=entry.archived_at if entry else "",
+                file_count=entry.file_count if entry else 0,
+                total_bytes=entry.total_bytes if entry else archive_path.stat().st_size,
+            )
+        return self.available_archives()
+
     def process_pending(self, *, allow_retry: bool = False) -> list[ProjectRecord]:
         pending = [
             record for record in self.snapshot()
@@ -183,6 +227,36 @@ class ArchiveManager:
             record.updated_at = utc_now_iso()
             self.records[record.source_path] = record
         return self.snapshot()
+
+    def restore_archives(self, archive_paths: list[str]) -> list[ArchivedProjectRecord]:
+        source_root = Path(self.settings.source_dir)
+        for archive_path in archive_paths:
+            archive_record = self.archive_records.get(archive_path)
+            result = self.archiver.restore_archive(Path(archive_path), target_root=source_root)
+            current = archive_record or ArchivedProjectRecord(
+                name=result.project_name,
+                archive_path=result.archive_path,
+                target_path=result.target_path,
+                status=result.status,
+                detail=result.detail,
+            )
+            current.status = result.status
+            current.detail = result.detail
+            current.target_path = result.target_path
+            self.archive_records[archive_path] = current
+            self.history_store.append(
+                HistoryEntry(
+                    timestamp=result.updated_at,
+                    project_name=result.project_name,
+                    status=result.status,
+                    message=result.detail,
+                    archive_path=result.archive_path,
+                    source_path=result.target_path,
+                )
+            )
+        self.discover_projects()
+        self.discover_archives()
+        return self.available_archives()
 
     def _append_history(self, record: ProjectRecord) -> None:
         self.history_store.append(

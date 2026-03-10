@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from pathlib import Path
 import sys
@@ -11,12 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from blockarchive.manager import ArchiveManager
 from blockarchive.models import AppSettings, ProjectStatus, SourcePolicy
 from blockarchive.settings import SettingsStore
+from test_support import workspace_tempdir
 
 
 class ArchiveManagerTests(unittest.TestCase):
     def test_scan_only_queues_and_run_queue_writes_index_and_history(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             project_dir = source_root / "ProjectA"
@@ -50,8 +49,7 @@ class ArchiveManagerTests(unittest.TestCase):
             self.assertEqual(history_entry["status"], "success")
 
     def test_move_source_policy_moves_source_after_success(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             archived_source_root = root / "ArchivedSource"
@@ -80,8 +78,7 @@ class ArchiveManagerTests(unittest.TestCase):
             self.assertTrue((archive_root / "ProjectB.tar").exists())
 
     def test_excluded_project_is_not_processed_when_queue_runs(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             project_a = source_root / "ProjectA"
@@ -114,6 +111,64 @@ class ArchiveManagerTests(unittest.TestCase):
             self.assertTrue(excluded_flags["ProjectB"])
             self.assertTrue((archive_root / "ProjectA.tar").exists())
             self.assertFalse((archive_root / "ProjectB.tar").exists())
+
+    def test_restore_archive_recreates_project_in_source_folder(self) -> None:
+        with workspace_tempdir() as root:
+            source_root = root / "ToArchive"
+            archive_root = root / "Archive"
+            project_dir = source_root / "ProjectRestore"
+            project_dir.mkdir(parents=True)
+            (project_dir / "notes.txt").write_text("hello", encoding="utf-8")
+
+            settings_store = SettingsStore(root / "settings.json")
+            settings_store.save(
+                AppSettings(
+                    source_dir=str(source_root),
+                    archive_dir=str(archive_root),
+                    auto_scan=False,
+                )
+            )
+
+            manager = ArchiveManager(settings_store)
+            manager.scan_and_process()
+            manager.process_pending()
+
+            self.assertTrue((archive_root / "ProjectRestore.tar").exists())
+            project_dir.rename(source_root / "ProjectRestore.original")
+
+            archives = manager.discover_archives()
+            restored = manager.restore_archives([archives[0].archive_path])
+
+            self.assertTrue((source_root / "ProjectRestore").exists())
+            self.assertTrue((source_root / "ProjectRestore" / "notes.txt").exists())
+            self.assertEqual(restored[0].status, "source-exists")
+
+    def test_restore_is_blocked_if_target_source_already_exists(self) -> None:
+        with workspace_tempdir() as root:
+            source_root = root / "ToArchive"
+            archive_root = root / "Archive"
+            project_dir = source_root / "ProjectConflict"
+            project_dir.mkdir(parents=True)
+            (project_dir / "notes.txt").write_text("hello", encoding="utf-8")
+
+            settings_store = SettingsStore(root / "settings.json")
+            settings_store.save(
+                AppSettings(
+                    source_dir=str(source_root),
+                    archive_dir=str(archive_root),
+                    auto_scan=False,
+                )
+            )
+
+            manager = ArchiveManager(settings_store)
+            manager.scan_and_process()
+            manager.process_pending()
+
+            archives = manager.discover_archives()
+            restored = manager.restore_archives([archives[0].archive_path])
+
+            self.assertEqual(restored[0].status, "source-exists")
+            self.assertIn("already exists", restored[0].detail)
 
 
 if __name__ == "__main__":

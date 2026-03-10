@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tarfile
-import tempfile
 import unittest
 from pathlib import Path
 import sys
@@ -10,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from blockarchive.archiver import ProjectArchiver
 from blockarchive.models import AppSettings, ProjectStatus
+from test_support import workspace_tempdir
 
 
 class ProjectArchiverTests(unittest.TestCase):
@@ -23,8 +23,7 @@ class ProjectArchiverTests(unittest.TestCase):
         self.assertEqual(settings.to_dict()["source_policy"], "keep")
 
     def test_archive_success_writes_tar_and_preserves_source(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             project_dir = source_root / "ProjectA"
@@ -55,8 +54,7 @@ class ProjectArchiverTests(unittest.TestCase):
             self.assertIn("ProjectA/assets/image.bin", members)
 
     def test_retry_is_required_when_stale_partial_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             project_dir = source_root / "ProjectB"
@@ -81,8 +79,7 @@ class ProjectArchiverTests(unittest.TestCase):
             self.assertTrue(stale_partial.exists())
 
     def test_failed_write_leaves_partial_and_source_intact(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        with workspace_tempdir() as root:
             source_root = root / "ToArchive"
             archive_root = root / "Archive"
             project_dir = source_root / "ProjectC"

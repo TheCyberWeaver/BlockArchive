@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..manager import ArchiveManager
-from ..models import AppSettings, HistoryEntry, ProjectRecord, ProjectStatus, SourcePolicy
+from ..models import AppSettings, ArchivedProjectRecord, HistoryEntry, ProjectRecord, ProjectStatus, SourcePolicy
 from .worker import ArchiveWorker
 
 
@@ -40,6 +40,8 @@ class MainWindow(QMainWindow):
     run_queue_requested = Signal()
     retry_requested = Signal()
     cleanup_requested = Signal()
+    refresh_archives_requested = Signal()
+    restore_archives_requested = Signal(object)
     set_excluded_requested = Signal(object, bool)
     save_settings_requested = Signal(object)
 
@@ -47,7 +49,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.manager = manager
         self.setWindowTitle("BlockArchive")
-        self.resize(1180, 760)
+        self.resize(1280, 820)
 
         self._worker_thread = QThread(self)
         self._worker = ArchiveWorker(manager)
@@ -57,10 +59,13 @@ class MainWindow(QMainWindow):
         self.run_queue_requested.connect(self._worker.run_queue)
         self.retry_requested.connect(self._worker.retry_failed)
         self.cleanup_requested.connect(self._worker.cleanup_stale_partials)
+        self.refresh_archives_requested.connect(self._worker.refresh_archives)
+        self.restore_archives_requested.connect(self._worker.restore_archives)
         self.set_excluded_requested.connect(self._worker.set_excluded)
         self.save_settings_requested.connect(self._worker.save_settings)
 
         self._worker.snapshot_updated.connect(self._render_projects)
+        self._worker.archives_updated.connect(self._render_archives)
         self._worker.history_updated.connect(self._render_history)
         self._worker.stale_partials_updated.connect(self._render_stale_partials)
         self._worker.settings_updated.connect(self._load_settings_into_form)
@@ -82,8 +87,8 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(20, 20, 20, 20)
+        root_layout.setSpacing(16)
 
         self.summary_banner = QLabel("Watching source and archive folders.")
         self.summary_banner.setObjectName("banner")
@@ -91,6 +96,7 @@ class MainWindow(QMainWindow):
 
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self._build_dashboard_tab(), "Dashboard")
+        self.tab_widget.addTab(self._build_restore_tab(), "Restore")
         self.tab_widget.addTab(self._build_settings_tab(), "Settings")
         self.tab_widget.addTab(self._build_history_tab(), "History")
         root_layout.addWidget(self.tab_widget)
@@ -102,95 +108,125 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        scan_action = QAction("Scan Now", self)
-        scan_action.triggered.connect(self.scan_requested.emit)
-        toolbar.addAction(scan_action)
-
-        run_action = QAction("Run Queue", self)
-        run_action.triggered.connect(self.run_queue_requested.emit)
-        toolbar.addAction(run_action)
-
-        retry_action = QAction("Retry Failed", self)
-        retry_action.triggered.connect(self.retry_requested.emit)
-        toolbar.addAction(retry_action)
-
-        cleanup_action = QAction("Clean Partials", self)
-        cleanup_action.triggered.connect(self.cleanup_requested.emit)
-        toolbar.addAction(cleanup_action)
+        actions = [
+            ("Scan Queue", self.scan_requested.emit),
+            ("Run Queue", self.run_queue_requested.emit),
+            ("Retry Failed", self.retry_requested.emit),
+            ("Refresh Archives", self.refresh_archives_requested.emit),
+            ("Restore Selected", self._restore_selected_archives),
+            ("Clean Partials", self.cleanup_requested.emit),
+        ]
+        for label, handler in actions:
+            action = QAction(label, self)
+            action.triggered.connect(handler)
+            toolbar.addAction(action)
 
     def _build_dashboard_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setSpacing(14)
 
-        paths_group = QGroupBox("Folders")
-        paths_layout = QGridLayout(paths_group)
+        folder_group = QGroupBox("Working Folders")
+        folder_layout = QGridLayout(folder_group)
         self.source_value = QLabel("")
         self.archive_value = QLabel("")
         self.source_value.setWordWrap(True)
         self.archive_value.setWordWrap(True)
-        paths_layout.addWidget(QLabel("Source"), 0, 0)
-        paths_layout.addWidget(self.source_value, 0, 1)
-        paths_layout.addWidget(QLabel("Archive"), 1, 0)
-        paths_layout.addWidget(self.archive_value, 1, 1)
-        layout.addWidget(paths_group)
+        folder_layout.addWidget(QLabel("Source"), 0, 0)
+        folder_layout.addWidget(self.source_value, 0, 1)
+        folder_layout.addWidget(QLabel("Archive"), 1, 0)
+        folder_layout.addWidget(self.archive_value, 1, 1)
+        layout.addWidget(folder_group)
 
         stats_row = QHBoxLayout()
         self.pending_card = self._make_metric_card("Pending")
         self.running_card = self._make_metric_card("Archiving")
         self.success_card = self._make_metric_card("Success")
         self.failed_card = self._make_metric_card("Failed")
-        stats_row.addWidget(self.pending_card["frame"])
-        stats_row.addWidget(self.running_card["frame"])
-        stats_row.addWidget(self.success_card["frame"])
-        stats_row.addWidget(self.failed_card["frame"])
+        for card in [self.pending_card, self.running_card, self.success_card, self.failed_card]:
+            stats_row.addWidget(card["frame"])
         layout.addLayout(stats_row)
 
-        button_row = QHBoxLayout()
-        scan_button = QPushButton("Scan now")
-        scan_button.clicked.connect(self.scan_requested.emit)
-        run_button = QPushButton("Run queue")
-        run_button.clicked.connect(self.run_queue_requested.emit)
-        retry_button = QPushButton("Retry failed")
-        retry_button.clicked.connect(self.retry_requested.emit)
-        exclude_button = QPushButton("Exclude selected")
-        exclude_button.clicked.connect(lambda: self._set_selected_excluded(True))
-        include_button = QPushButton("Include selected")
-        include_button.clicked.connect(lambda: self._set_selected_excluded(False))
-        open_archive_button = QPushButton("Open archive folder")
-        open_archive_button.clicked.connect(lambda: self._open_folder(self.archive_value.text()))
-        open_source_button = QPushButton("Open source folder")
-        open_source_button.clicked.connect(lambda: self._open_folder(self.source_value.text()))
-        clean_button = QPushButton("Clean partials")
-        clean_button.clicked.connect(self.cleanup_requested.emit)
-        for button in [
-            scan_button,
-            run_button,
-            retry_button,
-            exclude_button,
-            include_button,
-            open_archive_button,
-            open_source_button,
-            clean_button,
-        ]:
-            button_row.addWidget(button)
-        button_row.addStretch(1)
-        layout.addLayout(button_row)
+        queue_actions = QGroupBox("Queue Actions")
+        queue_actions_layout = QHBoxLayout(queue_actions)
+        buttons = [
+            ("Scan now", self.scan_requested.emit),
+            ("Run queue", self.run_queue_requested.emit),
+            ("Retry failed", self.retry_requested.emit),
+            ("Exclude selected", lambda: self._set_selected_excluded(True)),
+            ("Include selected", lambda: self._set_selected_excluded(False)),
+            ("Clean partials", self.cleanup_requested.emit),
+            ("Open archive folder", lambda: self._open_folder(self.archive_value.text())),
+            ("Open source folder", lambda: self._open_folder(self.source_value.text())),
+        ]
+        for label, handler in buttons:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            queue_actions_layout.addWidget(button)
+        queue_actions_layout.addStretch(1)
+        layout.addWidget(queue_actions)
 
         self.partial_label = QLabel("No stale partial archives detected.")
         self.partial_label.setWordWrap(True)
         layout.addWidget(self.partial_label)
 
+        queue_group = QGroupBox("Archive Queue")
+        queue_layout = QVBoxLayout(queue_group)
         self.project_table = QTableWidget(0, 8)
         self.project_table.setHorizontalHeaderLabels(
-            ["Project", "Queue", "Status", "Files", "Size", "Archive", "Updated", "Detail"]
+            ["Project", "Queue", "Status", "Files", "Size", "Archive File", "Updated", "Detail"]
         )
         self.project_table.setAlternatingRowColors(True)
         self.project_table.verticalHeader().setVisible(False)
         self.project_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.project_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.project_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.project_table, 1)
+        queue_layout.addWidget(self.project_table)
+        layout.addWidget(queue_group, 1)
+
+        return tab
+
+    def _build_restore_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+
+        intro_group = QGroupBox("Restore Archived Projects")
+        intro_layout = QVBoxLayout(intro_group)
+        intro_layout.addWidget(
+            QLabel(
+                "Select one or more archives and restore them back into the source folder. "
+                "If a folder with the same name already exists in Source, restore is blocked for safety."
+            )
+        )
+        action_row = QHBoxLayout()
+        buttons = [
+            ("Refresh archives", self.refresh_archives_requested.emit),
+            ("Restore selected", self._restore_selected_archives),
+            ("Open archive folder", lambda: self._open_folder(self.archive_value.text())),
+            ("Open source folder", lambda: self._open_folder(self.source_value.text())),
+        ]
+        for label, handler in buttons:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        intro_layout.addLayout(action_row)
+        layout.addWidget(intro_group)
+
+        restore_group = QGroupBox("Available Archives")
+        restore_layout = QVBoxLayout(restore_group)
+        self.archive_table = QTableWidget(0, 7)
+        self.archive_table.setHorizontalHeaderLabels(
+            ["Project", "Restore State", "Archived At", "Original Size", "Target Folder", "Archive File", "Detail"]
+        )
+        self.archive_table.setAlternatingRowColors(True)
+        self.archive_table.verticalHeader().setVisible(False)
+        self.archive_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.archive_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.archive_table.horizontalHeader().setStretchLastSection(True)
+        restore_layout.addWidget(self.archive_table)
+        layout.addWidget(restore_group, 1)
 
         return tab
 
@@ -199,13 +235,25 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setSpacing(14)
 
-        form_group = QGroupBox("Configuration")
-        form_layout = QFormLayout(form_group)
-        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        folders_group = QGroupBox("Folders")
+        folders_layout = QFormLayout(folders_group)
+        folders_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.source_edit = QLineEdit()
         self.archive_edit = QLineEdit()
         self.archived_source_edit = QLineEdit()
+        folders_layout.addRow("Source folder", self._path_row(self.source_edit, self._browse_source))
+        folders_layout.addRow("Archive folder", self._path_row(self.archive_edit, self._browse_archive))
+        folders_layout.addRow(
+            "Archived source folder",
+            self._path_row(self.archived_source_edit, self._browse_archived_source),
+        )
+        layout.addWidget(folders_group)
+
+        behavior_group = QGroupBox("Behavior")
+        behavior_layout = QFormLayout(behavior_group)
+        behavior_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
         self.poll_interval_spin = QSpinBox()
         self.poll_interval_spin.setRange(5, 86400)
         self.generate_checksum_check = QCheckBox("Generate .sha256 checksum files")
@@ -216,29 +264,29 @@ class MainWindow(QMainWindow):
         self.source_policy_combo.addItem("Move source to ArchivedSource", SourcePolicy.MOVE)
         self.source_policy_combo.addItem("Delete source after success", SourcePolicy.DELETE)
 
-        form_layout.addRow("Source folder", self._path_row(self.source_edit, self._browse_source))
-        form_layout.addRow("Archive folder", self._path_row(self.archive_edit, self._browse_archive))
-        form_layout.addRow(
-            "Archived source folder",
-            self._path_row(self.archived_source_edit, self._browse_archived_source),
-        )
-        form_layout.addRow("Poll interval (seconds)", self.poll_interval_spin)
-        form_layout.addRow("Source policy", self.source_policy_combo)
-        form_layout.addRow("", self.generate_checksum_check)
-        form_layout.addRow("", self.auto_scan_check)
-        form_layout.addRow("", self.skip_existing_check)
-        layout.addWidget(form_group)
+        behavior_layout.addRow("Poll interval (seconds)", self.poll_interval_spin)
+        behavior_layout.addRow("Source policy", self.source_policy_combo)
+        behavior_layout.addRow("", self.generate_checksum_check)
+        behavior_layout.addRow("", self.auto_scan_check)
+        behavior_layout.addRow("", self.skip_existing_check)
+        layout.addWidget(behavior_group)
 
+        notes_group = QGroupBox("Notes")
+        notes_layout = QVBoxLayout(notes_group)
         notes = QTextEdit()
         notes.setReadOnly(True)
         notes.setPlainText(
-            "Safety model:\n"
-            "- Source folders remain untouched until the tar archive is written, verified, and renamed from .partial.\n"
-            "- Failed writes leave the source folder intact.\n"
-            "- Retry Failed removes stale .partial files only for projects being retried.\n"
-            "- Index and history are written into the selected archive folder."
+            "Archive flow:\n"
+            "- Scan only queues projects.\n"
+            "- Run Queue processes queued items in order.\n"
+            "- Excluded items stay visible but are skipped.\n\n"
+            "Restore flow:\n"
+            "- Restore extracts the archive into a temporary folder first.\n"
+            "- The extracted project is moved into Source only after the archive is fully read.\n"
+            "- Restore is blocked if the target source folder already exists."
         )
-        layout.addWidget(notes)
+        notes_layout.addWidget(notes)
+        layout.addWidget(notes_group)
 
         save_button = QPushButton("Save settings")
         save_button.clicked.connect(self._save_settings)
@@ -342,7 +390,7 @@ class MainWindow(QMainWindow):
             counts[record.status] = counts.get(record.status, 0) + 1
             values = [
                 record.name,
-                "excluded" if record.excluded else "queued",
+                "Excluded" if record.excluded else "Queued",
                 record.status.value,
                 str(record.file_count),
                 self._format_bytes(record.total_bytes),
@@ -354,7 +402,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if column == 1 and record.excluded:
                     item.setForeground(QColor("#8c1d18"))
-                if column == 2:
+                elif column == 2:
                     item.setForeground(self._status_color(record.status))
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, record.source_path)
@@ -368,29 +416,35 @@ class MainWindow(QMainWindow):
         if source_warning is not None:
             self.summary_banner.setText(f"{source_warning.detail} {source_warning.source_path}")
         else:
-            total_projects = len(visible_records)
+            excluded_count = sum(1 for record in visible_records if record.excluded)
             self.summary_banner.setText(
-                f"{total_projects} project(s) tracked. "
+                f"{len(visible_records)} project(s) tracked. "
                 f"{counts[ProjectStatus.PENDING]} pending, "
                 f"{counts[ProjectStatus.ARCHIVING]} archiving, "
                 f"{counts[ProjectStatus.SUCCESS]} successful, "
-                f"{counts[ProjectStatus.FAILED]} failed. "
-                f"{sum(1 for record in visible_records if record.excluded)} excluded."
+                f"{counts[ProjectStatus.FAILED]} failed, "
+                f"{excluded_count} excluded."
             )
 
-    def _set_selected_excluded(self, excluded: bool) -> None:
-        selected_paths: list[str] = []
-        for item in self.project_table.selectedItems():
-            if item.column() != 0:
-                continue
-            source_path = item.data(Qt.ItemDataRole.UserRole)
-            if source_path:
-                selected_paths.append(source_path)
-        unique_paths = list(dict.fromkeys(selected_paths))
-        if not unique_paths:
-            self._show_status_message("Select one or more queued projects first.")
-            return
-        self.set_excluded_requested.emit(unique_paths, excluded)
+    def _render_archives(self, archive_records: list[ArchivedProjectRecord]) -> None:
+        self.archive_table.setRowCount(len(archive_records))
+        for row, record in enumerate(archive_records):
+            values = [
+                record.name,
+                record.status,
+                record.archived_at.replace("T", " ").split("+")[0] if record.archived_at else "-",
+                self._format_bytes(record.total_bytes),
+                record.target_path,
+                record.archive_path,
+                record.detail,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 1:
+                    item.setForeground(self._restore_status_color(record.status))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, record.archive_path)
+                self.archive_table.setItem(row, column, item)
 
     def _render_history(self, history_entries: list[HistoryEntry]) -> None:
         self.history_table.setRowCount(len(history_entries))
@@ -410,9 +464,35 @@ class MainWindow(QMainWindow):
             return
         joined = "\n".join(partials[:3])
         suffix = "" if len(partials) <= 3 else f"\n... and {len(partials) - 3} more"
-        self.partial_label.setText(
-            f"Stale partial archive(s) detected: {len(partials)}\n{joined}{suffix}"
-        )
+        self.partial_label.setText(f"Stale partial archive(s): {len(partials)}\n{joined}{suffix}")
+
+    def _set_selected_excluded(self, excluded: bool) -> None:
+        selected_paths: list[str] = []
+        for row in sorted({item.row() for item in self.project_table.selectedItems()}):
+            item = self.project_table.item(row, 0)
+            if item is None:
+                continue
+            source_path = item.data(Qt.ItemDataRole.UserRole)
+            if source_path:
+                selected_paths.append(source_path)
+        if not selected_paths:
+            self._show_status_message("Select one or more queued projects first.")
+            return
+        self.set_excluded_requested.emit(selected_paths, excluded)
+
+    def _restore_selected_archives(self) -> None:
+        archive_paths: list[str] = []
+        for row in sorted({item.row() for item in self.archive_table.selectedItems()}):
+            item = self.archive_table.item(row, 0)
+            if item is None:
+                continue
+            archive_path = item.data(Qt.ItemDataRole.UserRole)
+            if archive_path:
+                archive_paths.append(archive_path)
+        if not archive_paths:
+            self._show_status_message("Select one or more archives to restore.")
+            return
+        self.restore_archives_requested.emit(archive_paths)
 
     def _open_folder(self, path: str) -> None:
         if not path:
@@ -498,7 +578,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #184c70;
                 border-radius: 10px;
                 padding: 10px 14px;
-                min-width: 88px;
+                min-width: 92px;
             }
             QPushButton:hover {
                 background: #184c70;
@@ -550,6 +630,16 @@ class MainWindow(QMainWindow):
             ProjectStatus.SUCCESS: QColor("#1f6a3a"),
             ProjectStatus.FAILED: QColor("#8c1d18"),
             ProjectStatus.SKIPPED: QColor("#5f5a52"),
+        }
+        return palette.get(status, QColor("#22201c"))
+
+    @staticmethod
+    def _restore_status_color(status: str) -> QColor:
+        palette = {
+            "ready": QColor("#1f6a3a"),
+            "source-exists": QColor("#8a6100"),
+            "restored": QColor("#0e4b7a"),
+            "failed": QColor("#8c1d18"),
         }
         return palette.get(status, QColor("#22201c"))
 

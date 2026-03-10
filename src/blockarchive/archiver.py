@@ -6,8 +6,9 @@ import shutil
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
-from .models import AppSettings, ArchiveResult, ProjectStatus, SourcePolicy, path_as_str
+from .models import AppSettings, ArchiveResult, ProjectStatus, RestoreResult, SourcePolicy, path_as_str
 from .settings import resolve_archived_source_dir
 
 
@@ -163,6 +164,57 @@ class ProjectArchiver:
             removed.append(partial)
         return removed
 
+    def restore_archive(self, archive_path: Path, *, target_root: Path) -> RestoreResult:
+        if not archive_path.exists() or not archive_path.is_file():
+            return RestoreResult(
+                project_name=archive_path.stem,
+                archive_path=str(archive_path),
+                target_path=str(target_root / archive_path.stem),
+                status="failed",
+                detail="Archive file is missing.",
+            )
+
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with tarfile.open(archive_path, mode="r:") as tar_handle:
+                members = tar_handle.getmembers()
+                if not members:
+                    raise ArchiveError("Archive is empty.")
+
+                root_name = self._archive_root_name(members)
+                final_target = target_root / root_name
+                if final_target.exists():
+                    raise ArchiveError(f"Source folder already exists: {final_target}")
+
+                temp_root = target_root / f".restore-{sanitize_project_name(root_name)}-{uuid4().hex}"
+                temp_root.mkdir(parents=True, exist_ok=False)
+                try:
+                    self._safe_extract_members(tar_handle, members, temp_root)
+                    extracted_root = temp_root / root_name
+                    if not extracted_root.exists():
+                        raise ArchiveError("Restore verification failed because the extracted project folder is missing.")
+                    shutil.copytree(extracted_root, final_target)
+                finally:
+                    if temp_root.exists():
+                        shutil.rmtree(temp_root, ignore_errors=True)
+        except Exception as exc:
+            return RestoreResult(
+                project_name=archive_path.stem,
+                archive_path=str(archive_path),
+                target_path=str(target_root / archive_path.stem),
+                status="failed",
+                detail=str(exc),
+            )
+
+        return RestoreResult(
+            project_name=root_name,
+            archive_path=str(archive_path),
+            target_path=str(final_target),
+            status="restored",
+            detail="Archive restored into the source folder.",
+        )
+
     def _write_archive(self, source_dir: Path, partial_path: Path) -> None:
         with partial_path.open("wb") as raw_handle:
             with tarfile.open(fileobj=raw_handle, mode="w", format=tarfile.PAX_FORMAT) as tar_handle:
@@ -191,6 +243,41 @@ class ProjectArchiver:
 
         if not any(member.name == source_dir.name for member in members):
             raise ArchiveError("Archive verification failed because the project root folder is missing.")
+
+    def _archive_root_name(self, members: list[tarfile.TarInfo]) -> str:
+        for member in members:
+            parts = Path(member.name).parts
+            if parts:
+                return parts[0]
+        raise ArchiveError("Archive verification failed because no project root folder could be determined.")
+
+    def _safe_extract_members(
+        self,
+        tar_handle: tarfile.TarFile,
+        members: list[tarfile.TarInfo],
+        destination_root: Path,
+    ) -> None:
+        base_path = destination_root.resolve()
+        for member in members:
+            destination_path = (destination_root / member.name).resolve()
+            if base_path not in destination_path.parents and destination_path != base_path:
+                raise ArchiveError(f"Archive contains an unsafe path: {member.name}")
+            if member.islnk() or member.issym():
+                raise ArchiveError(f"Archive contains unsupported link entries: {member.name}")
+
+        for member in members:
+            destination_path = destination_root / member.name
+            if member.isdir():
+                destination_path.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            extracted = tar_handle.extractfile(member)
+            if extracted is None:
+                raise ArchiveError(f"Archive entry could not be read: {member.name}")
+            with extracted, destination_path.open("wb") as output_handle:
+                shutil.copyfileobj(extracted, output_handle)
 
     def _write_checksum_file(self, final_path: Path, checksum_sha256: str) -> None:
         checksum_path = final_path.with_suffix(final_path.suffix + ".sha256")
