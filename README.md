@@ -68,3 +68,14 @@ Backend verification uses the standard library test runner:
 ```powershell
 python -m unittest discover -s tests
 ```
+
+## Build Windows App
+
+Create a standalone Windows build with PyInstaller:
+
+```powershell
+python -m pip install -e .[build]
+pyinstaller blockarchive.spec --noconfirm
+```
+
+The distributable app will be generated in `dist\BlockArchive\`.
